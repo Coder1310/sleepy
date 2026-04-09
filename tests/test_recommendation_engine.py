@@ -21,6 +21,18 @@ def test_short_day_window_returns_recovery_break() -> None:
     sleepiness=4,
     stress=2,
     free_time_minutes=8,
-    current_energy=2,
   )
   assert rec.recommended_mode == "recovery_break"
+
+
+def test_power_nap_window_returns_explicit_power_nap_mode() -> None:
+  rec = build_recommendation(
+    request_type="power_nap",
+    slept_last_night_minutes=320,
+    quality=3,
+    sleepiness=5,
+    stress=2,
+    free_time_minutes=20,
+    current_energy=2,
+  )
+  assert rec.recommended_mode == "power_nap_10_20"

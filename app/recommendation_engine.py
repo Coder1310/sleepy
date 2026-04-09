@@ -30,12 +30,10 @@ def build_recommendation(
   """
   Прозрачная эвристика без медицинских обещаний.
 
-  Логика:
-  - базовая точка отсчета - 7-9 часов сна, но без жесткого навязывания
-  - если есть явный недосып или низкая оценка качества сна, рекомендации мягче
-  - высокий стресс усиливает блок расслабления
-  - короткое окно времени ведет в recovery-паузы вместо попытки уснуть
-  - история последних дней лишь слегка сдвигает выбор в сторону восстановления
+  request_type:
+  - night
+  - day
+  - power_nap
   """
   recent_entries = recent_entries or []
   recent_avg = _recent_average_minutes(recent_entries)
@@ -107,6 +105,64 @@ def build_recommendation(
         "На пару минут переведи внимание на дыхание или ощущения в теле",
       ],
       optional_audio_type="silence",
+      suggest_alarm=True,
+      confidence_label="medium",
+    )
+
+  if request_type == "power_nap":
+    if free_time_minutes < 10:
+      return Recommendation(
+        recommended_mode="power_nap_too_short_switch_to_reset",
+        recommended_duration_minutes=max(3, min(free_time_minutes, 8)),
+        explanation_for_user=(
+          "Для нормального power nap обычно лучше иметь хотя бы 10 минут окна. "
+          "Сейчас логичнее сделать короткий reset без давления на сон."
+        ),
+        steps=[
+          "Закрой глаза на 3-8 минут",
+          "Сделай медленное дыхание",
+          "Не пытайся обязательно уснуть",
+        ],
+        optional_audio_type="pink_noise",
+        suggest_alarm=False,
+        confidence_label="high",
+      )
+
+    duration = 20 if free_time_minutes >= 20 else free_time_minutes
+    if sleepiness >= 4 or slept_last_night_minutes < LOW_SLEEP_THRESHOLD or (current_energy is not None and current_energy <= 2):
+      return Recommendation(
+        recommended_mode="power_nap_10_20",
+        recommended_duration_minutes=duration,
+        explanation_for_user=(
+          "Окно хорошо подходит для power nap. Цель - быстро снизить сонливость и немного восстановиться, "
+          "а не обязательно глубоко уснуть."
+        ),
+        steps=[
+          "Поставь будильник так, чтобы уложиться в 10-20 минут",
+          "Ляг или сядь с хорошей опорой",
+          "Сделай 5 спокойных вдохов и выдохов",
+          "Если сон не приходит, просто полежи с закрытыми глазами",
+          "После сигнала встань не сразу, дай себе 1-2 минуты на включение",
+        ],
+        optional_audio_type="rain",
+        suggest_alarm=True,
+        confidence_label="high",
+      )
+
+    return Recommendation(
+      recommended_mode="light_power_nap",
+      recommended_duration_minutes=min(duration, 15),
+      explanation_for_user=(
+        "Даже если сонливость не очень высокая, короткий power nap или тихая пауза на 10-15 минут могут помочь "
+        "снизить усталость без тяжелого пробуждения."
+      ),
+      steps=[
+        "Выдели 10-15 минут в тихом месте",
+        "Закрой глаза и ослабь напряжение в лице и плечах",
+        "Не листай телефон до конца паузы",
+        "После паузы выпей воды и немного разомнись",
+      ],
+      optional_audio_type="forest",
       suggest_alarm=True,
       confidence_label="medium",
     )

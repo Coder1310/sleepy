@@ -15,7 +15,7 @@ from app.services.sleep_service import add_sleep_entry, get_recent_entries
 from app.services.stats_service import build_history_text, build_stats_text
 from app.services.user_service import get_or_create_user
 from bot.keyboards import main_menu, sleep_mode_keyboard
-from bot.states import DayFlow, NightFlow, WakeFlow
+from bot.states import DayFlow, NightFlow, PowerNapFlow, WakeFlow
 from bot.texts import DISCLAIMER, HELP_TEXT, PREMIUM_TEXT, SETTINGS_TEXT, START_TEXT
 
 
@@ -31,6 +31,51 @@ def _parse_int(text: str) -> int | None:
 
 async def _send_main_menu(message: Message, text: str) -> None:
   await message.answer(text, reply_markup=main_menu)
+
+
+async def _build_plan_message(
+  *,
+  recommendation,
+  alarm_minutes: int,
+  message: Message,
+  session: AsyncSession,
+  session_factory: async_sessionmaker[AsyncSession],
+  bot: Bot,
+  user_id: int,
+) -> str:
+  answer_lines = [
+    f"Режим: {recommendation.recommended_mode}",
+    f"Длительность: {recommendation.recommended_duration_minutes} мин",
+    "",
+    recommendation.explanation_for_user,
+    "",
+    "Шаги:",
+    *[f"- {step}" for step in recommendation.steps],
+    "",
+    f"Опциональный звук: {recommendation.optional_audio_type}",
+  ]
+
+  if alarm_minutes > 0:
+    alarm_time = datetime.utcnow() + timedelta(minutes=alarm_minutes)
+    alarm = await create_alarm(session, user_id=user_id, alarm_time=alarm_time)
+    schedule_alarm_jobs(
+      bot=bot,
+      session_factory=session_factory,
+      chat_id=message.from_user.id,
+      alarm_id=alarm.id,
+      code=alarm.code,
+      run_at=alarm.alarm_time,
+    )
+    answer_lines.extend(
+      [
+        "",
+        f"Будильник поставлен на {alarm_minutes} минут.",
+        f"Код для выключения: {alarm.code}",
+      ]
+    )
+
+  answer_lines.extend(["", DISCLAIMER])
+  return "\n".join(answer_lines)
 
 
 @router.message(Command("start"))
@@ -204,40 +249,125 @@ async def night_finish(
     recommendation=recommendation,
   )
 
-  answer_lines = [
-    f"Режим: {recommendation.recommended_mode}",
-    f"Длительность: {recommendation.recommended_duration_minutes} мин",
-    "",
-    recommendation.explanation_for_user,
-    "",
-    "Шаги:",
-    *[f"- {step}" for step in recommendation.steps],
-    "",
-    f"Опциональный звук: {recommendation.optional_audio_type}",
-  ]
-
-  if alarm_minutes > 0:
-    alarm_time = datetime.utcnow() + timedelta(minutes=alarm_minutes)
-    alarm = await create_alarm(session, user_id=user.id, alarm_time=alarm_time)
-    schedule_alarm_jobs(
-      bot=bot,
-      session_factory=session_factory,
-      chat_id=message.from_user.id,
-      alarm_id=alarm.id,
-      code=alarm.code,
-      run_at=alarm.alarm_time,
-    )
-    answer_lines.extend(
-      [
-        "",
-        f"Будильник поставлен на {alarm_minutes} минут.",
-        f"Код для выключения: {alarm.code}",
-      ]
-    )
-
-  answer_lines.extend(["", DISCLAIMER])
+  result_text = await _build_plan_message(
+    recommendation=recommendation,
+    alarm_minutes=alarm_minutes,
+    message=message,
+    session=session,
+    session_factory=session_factory,
+    bot=bot,
+    user_id=user.id,
+  )
   await state.clear()
-  await _send_main_menu(message, "\n".join(answer_lines))
+  await _send_main_menu(message, result_text)
+
+
+@router.message(F.text == "Power Nap 10-20 мин")
+async def power_nap_start(message: Message, state: FSMContext) -> None:
+  await state.clear()
+  await state.set_state(PowerNapFlow.slept)
+  await message.answer(
+    "Запускаем Power Nap. Сколько минут ты спал прошлой ночью?",
+    reply_markup=main_menu,
+  )
+
+
+@router.message(PowerNapFlow.slept)
+async def power_nap_slept(message: Message, state: FSMContext) -> None:
+  value = _parse_int(message.text)
+  if value is None or value < 0 or value > 24 * 60:
+    await message.answer("Введи число минут от 0 до 1440.")
+    return
+  await state.update_data(slept=value)
+  await state.set_state(PowerNapFlow.feeling)
+  await message.answer("Какой у тебя сейчас уровень энергии по шкале от 1 до 5?")
+
+
+@router.message(PowerNapFlow.feeling)
+async def power_nap_feeling(message: Message, state: FSMContext) -> None:
+  value = _parse_int(message.text)
+  if value is None or value < 1 or value > 5:
+    await message.answer("Введи число от 1 до 5.")
+    return
+  await state.update_data(feeling=value)
+  await state.set_state(PowerNapFlow.sleepiness)
+  await message.answer("Насколько ты сейчас сонный или уставший по шкале от 1 до 5?")
+
+
+@router.message(PowerNapFlow.sleepiness)
+async def power_nap_sleepiness(message: Message, state: FSMContext) -> None:
+  value = _parse_int(message.text)
+  if value is None or value < 1 or value > 5:
+    await message.answer("Введи число от 1 до 5.")
+    return
+  await state.update_data(sleepiness=value)
+  await state.set_state(PowerNapFlow.free_time)
+  await message.answer("Сколько свободных минут у тебя есть сейчас? Для power nap лучше 10-20 минут.")
+
+
+@router.message(PowerNapFlow.free_time)
+async def power_nap_free_time(message: Message, state: FSMContext) -> None:
+  value = _parse_int(message.text)
+  if value is None or value < 1 or value > 60:
+    await message.answer("Введи число минут от 1 до 60.")
+    return
+  await state.update_data(free_time=value)
+  await state.set_state(PowerNapFlow.alarm_minutes)
+  await message.answer("Через сколько минут поставить будильник? Напиши 0, если не нужен.")
+
+
+@router.message(PowerNapFlow.alarm_minutes)
+async def power_nap_finish(
+  message: Message,
+  state: FSMContext,
+  session: AsyncSession,
+  session_factory: async_sessionmaker[AsyncSession],
+  bot: Bot,
+) -> None:
+  alarm_minutes = _parse_int(message.text)
+  if alarm_minutes is None or alarm_minutes < 0 or alarm_minutes > 24 * 60:
+    await message.answer("Введи число минут от 0 до 1440.")
+    return
+
+  data = await state.get_data()
+  user = await get_or_create_user(session, message.from_user.id, message.from_user.full_name)
+  recent_entries = await get_recent_entries(session, user_id=user.id, limit=7)
+
+  recommendation = build_recommendation(
+    request_type="power_nap",
+    slept_last_night_minutes=data["slept"],
+    quality=3,
+    sleepiness=data["sleepiness"],
+    stress=2,
+    free_time_minutes=data["free_time"],
+    current_energy=data["feeling"],
+    recent_entries=recent_entries,
+  )
+
+  await create_session_request(
+    session,
+    user_id=user.id,
+    requested_mode="power_nap",
+    free_time_minutes=data["free_time"],
+    slept_last_night_minutes=data["slept"],
+    current_energy_1_5=data["feeling"],
+    current_sleepiness_1_5=data["sleepiness"],
+    current_stress_1_5=2,
+    wants_alarm=alarm_minutes > 0,
+    recommendation=recommendation,
+  )
+
+  result_text = await _build_plan_message(
+    recommendation=recommendation,
+    alarm_minutes=alarm_minutes,
+    message=message,
+    session=session,
+    session_factory=session_factory,
+    bot=bot,
+    user_id=user.id,
+  )
+  await state.clear()
+  await _send_main_menu(message, result_text)
 
 
 @router.message(F.text == "Дневной сон / перерыв")
@@ -332,40 +462,17 @@ async def day_finish(
     recommendation=recommendation,
   )
 
-  answer_lines = [
-    f"Режим: {recommendation.recommended_mode}",
-    f"Длительность: {recommendation.recommended_duration_minutes} мин",
-    "",
-    recommendation.explanation_for_user,
-    "",
-    "Шаги:",
-    *[f"- {step}" for step in recommendation.steps],
-    "",
-    f"Опциональный звук: {recommendation.optional_audio_type}",
-  ]
-
-  if alarm_minutes > 0:
-    alarm_time = datetime.utcnow() + timedelta(minutes=alarm_minutes)
-    alarm = await create_alarm(session, user_id=user.id, alarm_time=alarm_time)
-    schedule_alarm_jobs(
-      bot=bot,
-      session_factory=session_factory,
-      chat_id=message.from_user.id,
-      alarm_id=alarm.id,
-      code=alarm.code,
-      run_at=alarm.alarm_time,
-    )
-    answer_lines.extend(
-      [
-        "",
-        f"Будильник поставлен на {alarm_minutes} минут.",
-        f"Код для выключения: {alarm.code}",
-      ]
-    )
-
-  answer_lines.extend(["", DISCLAIMER])
+  result_text = await _build_plan_message(
+    recommendation=recommendation,
+    alarm_minutes=alarm_minutes,
+    message=message,
+    session=session,
+    session_factory=session_factory,
+    bot=bot,
+    user_id=user.id,
+  )
   await state.clear()
-  await _send_main_menu(message, "\n".join(answer_lines))
+  await _send_main_menu(message, result_text)
 
 
 @router.message(F.text == "Я уже проснулся / как я поспал")
